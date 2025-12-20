@@ -1,0 +1,92 @@
+[package]
+name = "ws-relay-core"
+version = "0.1.0"
+edition = "2024"
+description = "High-performance WebSocket relay core - Lite & Advanced versions"
+
+[features]
+default = []  # 默认 Lite 版（无数据库，单 token）
+advanced = [  # Advanced 版（多用户管理 + Web UI）
+    "dep:sqlx",
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:hyper",
+    "dep:bcrypt",
+    "dep:jsonwebtoken",
+    "dep:lru",
+    "dep:uuid",
+    "dep:regex",
+]
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1.47", features = ["full"] }
+socket2 = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# WebSocket + TLS
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots", "native-tls"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2.2"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+futures-util = "0.3.31"
+
+# 序列化
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+
+# 配置
+toml = "0.8"
+
+# 加密签名 (OKX API)
+hmac = "0.12.1"
+sha2 = "0.10.9"
+base64 = "0.22.1"
+
+# 时间
+chrono = "0.4.42"
+
+# 日志
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-appender = "0.2"  # 日志轮转
+
+# 错误处理
+anyhow = "1.0.100"
+thiserror = "2.0"
+
+# ============================================
+# 以下依赖仅在 advanced feature 启用时编译
+# ============================================
+
+# 数据库（可选）
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "chrono", "migrate"], optional = true }
+
+# REST API（可选）
+axum = { version = "0.7", features = ["ws", "macros"], optional = true }
+axum-extra = { version = "0.9", features = ["typed-header"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"], optional = true }
+hyper = { version = "1.5", optional = true }
+
+# 认证与加密（可选）
+bcrypt = { version = "0.15", optional = true }
+jsonwebtoken = { version = "9.3", optional = true }
+
+# 缓存（可选）
+lru = { version = "0.12", optional = true }
+
+# 工具（可选）
+uuid = { version = "1.11", features = ["v4", "serde"], optional = true }
+regex = { version = "1.11", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
