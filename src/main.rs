@@ -1,151 +1,64 @@
-//! ws-relay-core - 高性能 WebSocket 中继
+//! ws-relay-core - 高性能 WebSocket + REST 中继代理
 
+mod auth;
 mod config;
-mod proxy;
-mod server;
+mod rest;
+mod ws;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use axum::{middleware, routing::{any, get}, Router};
+use axum_server::tls_rustls::RustlsConfig;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tracing_appender::rolling;
-use std::fs;
-
-use crate::config::Config;
-use crate::server::RelayServer;
-
-const PIDFILE: &str = "/tmp/ws-relay.pid";
-
-/// PID 文件守卫（RAII 模式，自动清理）
-struct PidFileGuard;
-
-impl PidFileGuard {
-    fn create() -> Result<Self> {
-        let pid = std::process::id();
-        fs::write(PIDFILE, pid.to_string())?;
-        info!("PID 文件已创建: {} (pid={})", PIDFILE, pid);
-        Ok(Self)
-    }
-}
-
-impl Drop for PidFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(PIDFILE);
-        info!("PID 文件已清理");
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 检查是否是 reload 命令
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "reload" {
-        return handle_reload();
-    }
-
-    // 安装 rustls crypto provider
+    // 初始化 TLS crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
+    // 初始化日志
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     // 加载配置
-    let config_path = args.get(1)
-        .map(|s| s.as_str())
-        .unwrap_or("config.toml");
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
+    let config = config::Config::load(&config_path)?;
 
-    let config = Config::load(config_path)?;
+    info!("ws-relay-core v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "用户: {}",
+        config.users.iter().map(|u| u.name.as_str()).collect::<Vec<_>>().join(", ")
+    );
 
-    // 初始化日志（带轮转）
-    init_logging(&config)?;
+    // 认证状态
+    let auth_state = auth::AuthState::new(&config.users);
 
-    info!("Starting ws-relay v{}", env!("CARGO_PKG_VERSION"));
-    info!("Config loaded from {}", config_path);
-    info!("用户数: {}", config.users.len());
+    // 构建路由
+    let app = Router::new()
+        .route("/ws/{*target}", get(ws::handler))
+        .route("/rest/{*target}", any(rest::handler))
+        .layer(middleware::from_fn_with_state(auth_state, auth::middleware));
 
-    // 创建 pidfile（RAII 自动清理）
-    let _pid_guard = PidFileGuard::create()?;
+    // TLS 配置
+    let tls_config = RustlsConfig::from_pem_file(
+        &config.server.tls_cert,
+        &config.server.tls_key,
+    )
+    .await?;
 
     // 启动服务器
-    let server = RelayServer::new(config, config_path.to_string())?;
-    server.run().await
-}
+    let addr = format!("{}:{}", config.server.host, config.server.port);
+    info!("服务启动: https://{}", addr);
+    info!("WS:   /ws/<target_url>?token=xxx");
+    info!("REST: /rest/<target_url> + Header: X-Token");
 
-/// 处理 reload 命令
-fn handle_reload() -> Result<()> {
-    #[cfg(unix)]
-    {
-        // 读取 pidfile
-        let pid_str = fs::read_to_string(PIDFILE)
-            .map_err(|_| anyhow!("无法读取 pidfile: {}，服务器可能未运行", PIDFILE))?;
-
-        let pid: i32 = pid_str.trim().parse()
-            .map_err(|_| anyhow!("pidfile 格式错误"))?;
-
-        // 验证进程是否存在
-        unsafe {
-            if libc::kill(pid, 0) != 0 {
-                // 进程不存在，清理残留的 PID 文件
-                let _ = fs::remove_file(PIDFILE);
-                return Err(anyhow!("重载失败: 进程不存在（已清理残留 PID 文件）"));
-            }
-        }
-
-        // 发送 SIGHUP 信号
-        unsafe {
-            if libc::kill(pid, libc::SIGHUP) == 0 {
-                println!("配置重载成功");
-                Ok(())
-            } else {
-                Err(anyhow!("重载失败: 发送信号失败"))
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        Err(anyhow!("reload 命令仅支持 Unix 系统"))
-    }
-}
-
-/// 初始化日志系统（带轮转）
-fn init_logging(config: &Config) -> Result<()> {
-    use std::fs;
-
-    // 创建日志目录
-    fs::create_dir_all(&config.logging.directory)?;
-
-    // 创建文件 appender（带轮转）
-    let file_appender = match config.logging.rotation.as_str() {
-        "daily" => rolling::daily(&config.logging.directory, &config.logging.file_prefix),
-        "hourly" => rolling::hourly(&config.logging.directory, &config.logging.file_prefix),
-        "never" => rolling::never(&config.logging.directory, &config.logging.file_prefix),
-        _ => rolling::daily(&config.logging.directory, &config.logging.file_prefix),
-    };
-
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-
-    // 配置日志等级
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&config.logging.level))?;
-
-    // 文件输出层
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false);
-
-    // 构建订阅器
-    let registry = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(file_layer);
-
-    if config.logging.console_output {
-        // 同时输出到控制台
-        registry.with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout)).init();
-    } else {
-        registry.init();
-    }
-
-    // 防止 _guard 被释放
-    std::mem::forget(_guard);
+    axum_server::bind_rustls(addr.parse()?, tls_config)
+        .serve(app.into_make_service())
+        .await?;
 
     Ok(())
 }

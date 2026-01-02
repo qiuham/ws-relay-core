@@ -1,32 +1,22 @@
 # ws-relay-core
 
-基于 Rust 的高性能 WebSocket 中继服务器。
+高性能 WebSocket + REST 中继代理，用于交易所 API 转发。
 
-**延迟开销仅 0.55ms (1.1%)** | **吞吐量几乎0损失** | **支持热更新**
+## 特性
 
-## 性能
+- **同端口双协议** - WS 和 REST 共用 443 端口，路由分发
+- **零配置转发** - 目标 URL 由客户端动态指定
+- **Token 认证** - 支持 Query 参数和 Header 两种方式
+- **TLS 加密** - 基于 rustls，安全高效
+- **连接池复用** - REST 请求复用 HTTP 连接
 
-测试环境: 东京VPS   模拟ws服务端
+## 架构
 
-**延迟测试（Ping，1000次）:**
-
-- 直连: 48.96 ms
-- 通过 ws-relay: 49.52 ms
-- **延迟开销: +0.55ms (+1.1%)**
-
-**吞吐量测试（每连接，持续10秒）:**
-- 直连: 45,419 msg/s
-- 通过 ws-relay: 45,416 msg/s
-- **吞吐量: 100.0%（零损耗）**
-
-## 优势
-
-1. **极低延迟** - 相比直连仅增加 0.55ms 延迟
-2. **零拷贝转发** - 使用 `futures::forward()` 批量转发，无额外开销
-3. **无需重启** - 修改用户配置后 reload 即可生效
-4. **高并发** - 基于 Tokio 异步运行时，支持数千并发连接
-5. **TCP 优化** - 启用 TCP_NODELAY、TCP_QUICKACK、TCP_FASTOPEN
-6. **TLS 优化** - 支持 Session Resumption (TLS 1.3 0-RTT)
+```
+客户端 ──→ ws-relay-core ──→ 目标服务器
+          /ws/*   → WebSocket 双向透传
+          /rest/* → HTTP 反向代理
+```
 
 ## 编译
 
@@ -36,96 +26,82 @@ cargo build --release
 
 ## 配置
 
-`config.toml`：
+`config.toml`:
 
 ```toml
 [server]
 host = "0.0.0.0"
 port = 443
-enable_tls = true
 tls_cert = "cert.pem"
 tls_key = "key.pem"
-auth_timeout_secs = 10
-idle_timeout_secs = 600
 
 [[users]]
 name = "admin"
 token = "your_token_here"
+```
 
-[logging]
-level = "info"
-directory = "logs"
-rotation = "daily"
+生成自签名证书：
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
+```
+
+## 启动
+
+```bash
+./target/release/ws-relay-core config.toml
 ```
 
 ## 使用
 
-启动服务：
+### WebSocket
 
-```bash
-./target/release/ws-relay-core
+URL 格式: `wss://relay:443/ws/<target_url>?token=xxx`
+
+```python
+import websockets
+import urllib.parse
+
+target = "wss://ws.okx.com:8443/ws/v5/public"
+url = f"wss://relay:443/ws/{urllib.parse.quote(target, safe='')}?token=xxx"
+
+async with websockets.connect(url, ssl=ssl_ctx) as ws:
+    await ws.send('{"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"}]}')
+    async for msg in ws:
+        print(msg)
 ```
 
-修改配置后重新加载：
+### REST
 
-```bash
-./target/release/ws-relay-core reload
+URL 格式: `https://relay:443/rest/<target_url>`
+认证方式: Header `X-Token: xxx`
+
+```python
+import requests
+
+target = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+url = f"https://relay:443/rest/{urllib.parse.quote(target, safe='')}"
+
+resp = requests.get(url, headers={"X-Token": "xxx"}, verify=False)
+print(resp.json())
 ```
 
-## 客户端示例
+## 性能
 
-```javascript
-const ws = new WebSocket('wss://your-server:443');
+| 指标 | 数值 |
+|------|------|
+| WS 延迟开销 | +0.5ms |
+| REST 延迟开销 | +1ms |
+| WS 吞吐量 | 45,000 msg/s |
 
-ws.onopen = () => {
-  // 发送认证
-  ws.send(JSON.stringify({
-    token: "your_token_here",
-    target: "wss://target-server.com/ws"
-  }));
-};
+## 依赖
 
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-  if (msg.status === "已连接") {
-    // 认证成功，开始通信
-    ws.send("hello");
-  }
-};
-```
-
-## 工作原理
-
-1. 客户端发送认证消息: `{"token": "...", "target": "wss://..."}`
-2. ws-relay 验证 token 并连接目标服务器
-3. 返回连接成功: `{"status": "已连接"}`
-4. 进入透传模式，所有消息双向转发（零拷贝）
-
-## 配置项说明
-
-### server
-
-- `host` - 监听地址，默认 0.0.0.0
-- `port` - 监听端口，默认 443
-- `enable_tls` - 是否启用 TLS，默认 true
-- `tls_cert` - TLS 证书路径
-- `tls_key` - TLS 私钥路径
-- `auth_timeout_secs` - 认证超时秒数，默认 10
-- `idle_timeout_secs` - 空闲超时秒数，默认 600（0 为禁用）
-- `insecure_skip_verify` - 跳过目标服务器 TLS 验证，默认 false
-
-### users
-
-- `name` - 用户名，必填
-- `token` - 认证 token，必填且不能重复
-
-### logging
-
-- `level` - 日志级别：trace, debug, info, warn, error
-- `directory` - 日志目录，默认 logs
-- `file_prefix` - 日志文件前缀，默认 ws-relay
-- `rotation` - 轮转策略：daily, hourly, never
-- `console_output` - 是否输出到控制台，默认 true
+- Rust 1.70+
+- tokio (异步运行时)
+- axum 0.8 (Web 框架)
+- tokio-tungstenite (WebSocket)
+- reqwest (HTTP 客户端)
+- rustls (TLS)
 
 ## License
 

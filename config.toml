@@ -1,37 +1,12 @@
 # ws-relay-core 配置文件
 
 [server]
-# 监听地址和端口
 host = "0.0.0.0"
 port = 443
-
-# TLS 配置
-enable_tls = true
 tls_cert = "cert.pem"
 tls_key = "key.pem"
 
-# 超时配置（秒）
-auth_timeout_secs = 10
-idle_timeout_secs = 600
-
-# TLS 连接目标服务器配置
-insecure_skip_verify = false
-
-# ===== 用户配置 =====
-# 至少需要配置一个用户
-
+# 用户配置
 [[users]]
 name = "admin"
-token = "change_this_secret_token_admin"
-
-[[users]]
-name = "alice"
-token = "change_this_secret_token_alice"
-
-# ===== 日志配置 =====
-[logging]
-level = "info"
-directory = "logs"
-file_prefix = "ws-relay"
-rotation = "daily"
-console_output = true
+token = "your_secret_token_here"
