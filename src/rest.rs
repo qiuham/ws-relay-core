@@ -2,12 +2,11 @@
 
 use axum::{
     body::Body,
-    extract::{Path, Request},
+    extract::Request,
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use once_cell::sync::Lazy;
-use percent_encoding::percent_decode_str;
 use reqwest::Client;
 use tracing::{error, info};
 
@@ -21,12 +20,16 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
 });
 
 /// REST 代理处理器
-/// 路由: /rest/{target_url}
-pub async fn handler(Path(target): Path<String>, req: Request) -> Response {
-    // URL 解码
-    let target = percent_decode_str(&target)
-        .decode_utf8_lossy()
-        .to_string();
+/// 路由: /rest + Header X-Target-URL
+pub async fn handler(req: Request) -> Response {
+    // 从 Header 获取 target URL
+    let target = match req.headers().get("X-Target-URL") {
+        Some(v) => match v.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid X-Target-URL header").into_response(),
+        },
+        None => return (StatusCode::BAD_REQUEST, "Missing X-Target-URL header").into_response(),
+    };
 
     let method = req.method().clone();
     info!("REST: {} {}", method, target);

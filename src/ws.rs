@@ -3,22 +3,26 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Path, WebSocketUpgrade,
+        WebSocketUpgrade,
     },
-    response::Response,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use percent_encoding::percent_decode_str;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungMessage};
 use tracing::{error, info};
 
 /// WebSocket 处理器
-/// 路由: /ws/{target_url}
-pub async fn handler(ws: WebSocketUpgrade, Path(target): Path<String>) -> Response {
-    // URL 解码
-    let target = percent_decode_str(&target)
-        .decode_utf8_lossy()
-        .to_string();
+/// 路由: /ws + Header X-Target-URL
+pub async fn handler(ws: WebSocketUpgrade, headers: HeaderMap) -> Response {
+    // 从 Header 获取 target URL
+    let target = match headers.get("X-Target-URL") {
+        Some(v) => match v.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return (StatusCode::BAD_REQUEST, "Invalid X-Target-URL header").into_response(),
+        },
+        None => return (StatusCode::BAD_REQUEST, "Missing X-Target-URL header").into_response(),
+    };
 
     info!("WS 连接请求: {}", target);
     ws.on_upgrade(move |socket| relay(socket, target))

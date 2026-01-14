@@ -37,10 +37,10 @@ async fn main() -> Result<()> {
     // 认证状态
     let auth_state = auth::AuthState::new(&config.users);
 
-    // 构建路由
+    // 构建路由（target URL 通过 X-Target-URL Header 传递）
     let app = Router::new()
-        .route("/ws/{*target}", get(ws::handler))
-        .route("/rest/{*target}", any(rest::handler))
+        .route("/ws", get(ws::handler))
+        .route("/rest", any(rest::handler))
         .layer(middleware::from_fn_with_state(auth_state, auth::middleware));
 
     // TLS 配置
@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
     // 启动服务器
     let addr = format!("{}:{}", config.server.host, config.server.port);
     info!("服务启动: https://{}", addr);
-    info!("WS:   /ws/<target_url>?token=xxx");
-    info!("REST: /rest/<target_url> + Header: X-Token");
+    info!("WS:   /ws + Header: X-Token, X-Target-URL");
+    info!("REST: /rest + Header: X-Token, X-Target-URL");
 
     axum_server::bind_rustls(addr.parse()?, tls_config)
         .serve(app.into_make_service())
